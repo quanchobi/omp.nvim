@@ -1,179 +1,253 @@
 # omp.nvim
 
-Neovim plugin that talks to the [omp](https://omp.sh/) agent running in your current directory — without leaving your editor.
+Talk to the [omp](https://omp.sh/) session running next to your editor, from Neovim. Ask about a selection,
+the diff hunk under the cursor, staged changes, diagnostics, or the quickfix list. The question goes into the
+live omp session you already have open; nothing new is spawned.
 
-![omp.nvim overview](assets/overview_RZS8Ip7dJQ.gif)
+Fork of [l3aro/omp.nvim](https://github.com/l3aro/omp.nvim), adding diff/diagnostic context, multi-session
+discovery, safe delivery while omp is busy, a multi-line prompt editor, omp profile support, and a Nix flake.
+See the [changelog](CHANGELOG.md).
 
-## ⭐ Motivation
+## Features
 
-ACP treats OMP as a simple prompt endpoint. As a result, many of OMP's interactive capabilities are inaccessible from Neovim, forcing users to switch back to the terminal for common tasks like changing models or toggling runtime features.
+- Sends prompts into a running omp session (same directory, a parent, or a subdirectory of Neovim's cwd)
+- Several omp sessions? Neovim asks which one and remembers your choice (`:OmpSelect` to switch)
+- Context placeholders: `@this`, `@buffer`, `@hunk`, `@diff`, `@unstaged`, `@staged`, `@diagnostics`, `@quickfix`
+- Diffs include unsaved edits (buffer vs git index)
+- Prompts sent while omp is working wait for the current turn instead of interrupting it
+- Hold mode: drop the prompt into omp's input box and press Enter there yourself
+- Multi-line prompt editor with normal-mode editing
+- Files omp changed are reloaded when its turn ends
+- Bridge extension installs itself into omp's extension directories, including named profiles
 
-Rather than being another AI chat plugin, this project focuses on exposing OMP itself inside Neovim.
+## Requirements
 
-## ✨ Features
+- Neovim 0.11+
+- omp
+- git (for the diff placeholders)
 
-- Inject prompts into the omp session running in the current directory
-- `@this` / `@buffer` placeholders resolved to inlined, fenced editor context
-- Send the current line, a visual selection, or any `:range` of the file
-- Interactive prompt with Enter-to-submit, Esc-to-discard
-- Zero-config bridge extension, auto-installed and auto-discovered by omp
-- Files omp changes are reloaded automatically when a turn ends
-- Simple, sensible, Vim-y defaults
+## Install
 
-## 📦 Setup
-
-Requires Neovim 0.11+ (uses `vim.uv` pipe transport; the recommended `vim.pack` setup needs 0.11).
-
-[vim.pack](https://neovim.io/doc/user/pack/#vim.pack) (recommended)
-
-```lua
--- Disable the default <leader>oa maps and bind your own (flag before add)
-vim.g.omp_nvim_no_keymaps = true
-vim.keymap.set("n", "<leader>om", "<Cmd>OmpAsk<CR>", { desc = "omp: ask" })
-vim.keymap.set("x", "<leader>om", function()
-  require("omp_nvim").ask()
-end, { desc = "omp: ask selection" })
-
-vim.pack.add({
-  {
-    src = "https://github.com/l3aro/omp.nvim",
-    version = vim.version.range("*"), -- Latest stable release
-  },
-})
-```
-
-<details>
+<details open>
 <summary><a href="https://github.com/folke/lazy.nvim">lazy.nvim</a></summary>
 
 ```lua
 {
-  "l3aro/omp.nvim",
-  version = "*", -- Latest stable release
-  -- Disable the default <leader>oa maps; init runs before the plugin loads
-  init = function()
-    vim.g.omp_nvim_no_keymaps = true
-  end,
-  keys = {
-    { "<leader>om", "<Cmd>OmpAsk<CR>", desc = "omp: ask" },
-    { "<leader>om", function()
-      require("omp_nvim").ask()
-    end, mode = "x", desc = "omp: ask selection" },
-  },
+  "quanchobi/omp.nvim",
+  opts = {}, -- see Configuration
 }
 ```
 
 </details>
 
+<details>
+<summary>vim.pack</summary>
+
+```lua
+vim.pack.add({ "https://github.com/quanchobi/omp.nvim" })
+require("omp_nvim").setup({})
+```
+
+</details>
+
+<details>
+<summary>Nix (flake)</summary>
+
+```nix
+inputs.omp-nvim.url = "github:quanchobi/omp.nvim";
+```
+
+The flake provides:
+
+| Output                         | Use                                                              |
+| ------------------------------ | ---------------------------------------------------------------- |
+| `nixvimModules.default`        | `plugins.omp-nvim = { enable = true; settings = { ... }; };`     |
+| `homeModules.default`          | `programs.omp-nvim.enable = true;` installs the bridge extension |
+| `overlays.default`             | adds `pkgs.vimPlugins.omp-nvim`                                  |
+| `packages.<system>.default`    | the plugin                                                       |
+
+With Nix managing the bridge, turn off the plugin's own install:
+
+```nix
+# nixvim
+imports = [ inputs.omp-nvim.nixvimModules.default ];
+plugins.omp-nvim = {
+  enable = true;
+  settings.auto_install = false;
+};
+
+# home-manager
+imports = [ inputs.omp-nvim.homeModules.default ];
+programs.omp-nvim = {
+  enable = true;
+  profiles = [ "work" ]; # named omp profiles that should load it too
+};
+```
+
+Even with `auto_install` on, symlinked copies (what home-manager creates) are never overwritten.
+
+</details>
+
 > [!TIP]
-> Run `:checkhealth omp_nvim` after setup.
+> Run `:checkhealth omp_nvim` after setup. It lists install targets, running omp sessions, and which one Neovim
+> would talk to from the current directory.
 
-## 🔌 Bridge extension
+## The bridge extension
 
-`setup()` auto-installs the bridge to `~/.omp/agent/extensions/omp-nvim-bridge.ts`, where every omp discovers it at startup. You normally never touch it, but reinstall (or repair) anytime:
+omp loads a small bridge (`extension/omp-nvim-bridge.ts`) that accepts prompts from Neovim. The plugin copies
+it into every extension directory omp reads, on startup and with `:OmpNvimInstallExtension`:
 
-```vim
-:OmpNvimInstallExtension
+- the default agent dir: `~/.omp/agent/extensions`, or `$PI_CODING_AGENT_DIR/extensions`, or
+  `~/$PI_CONFIG_DIR/agent/extensions`
+- every named profile: `~/.omp/profiles/<name>/agent/extensions`
+
+Set `extension_dirs` to replace detection. Restart running omp instances after the bridge is installed or
+updated; omp loads extensions at startup.
+
+## Usage
+
+### Asking
+
+`<leader>oa` opens the prompt editor at the bottom of the screen. Its title names the omp session it will
+reach. In visual mode the selection is attached automatically unless the prompt already uses a placeholder.
+
+| Key (in the editor)   | Action                                          |
+| --------------------- | ----------------------------------------------- |
+| `<CR>`                | send (or hold, if opened with `<leader>oA`)     |
+| `<M-CR>`              | the other one: hold instead of send, or vice versa |
+| `<C-j>` / `<S-CR>`    | newline                                         |
+| `<Esc>`               | normal mode; `q` or `<Esc>` there cancels       |
+| `<C-c>`               | cancel                                          |
+
+If a placeholder can't resolve (no diff under the cursor, no diagnostics, ...), you get a warning and the
+editor reopens with your text.
+
+**Hold** puts the prompt into omp's input box without sending it, so you can add to it there and press Enter
+yourself.
+
+### Commands
+
+| Command                    | Sends                                                     |
+| -------------------------- | --------------------------------------------------------- |
+| `:OmpAsk`                  | opens the prompt editor                                   |
+| `:OmpAsk text`             | `text`, with placeholders resolved                        |
+| `:5,20OmpAsk [text]`       | lines 5–20 of the current file, with optional instruction |
+| `:'<,'>OmpAsk [text]`      | the last visual range                                     |
+| `:OmpAsk! ...`             | any of the above, held in omp's input instead of sent     |
+| `:OmpSelect`               | choose which omp session to talk to                       |
+| `:OmpNvimInstallExtension` | (re)install the bridge                                    |
+
+### Placeholders
+
+| Placeholder    | Becomes                                                                   |
+| -------------- | ------------------------------------------------------------------------- |
+| `@this`        | the visual range (`@path:5-20`), else the current file                    |
+| `@buffer`      | the current file (`@path`)                                                |
+| `@hunk`        | the unstaged diff hunk under the cursor                                   |
+| `@diff`        | this file's unstaged diff                                                 |
+| `@unstaged`    | `git diff` for the whole repository                                       |
+| `@staged`      | `git diff --cached` for the whole repository                              |
+| `@diagnostics` | diagnostics in the visual range, else the whole buffer                    |
+| `@quickfix`    | the current quickfix list                                                 |
+
+- Saved files are sent as references (`@path:5-20`) that omp reads itself. Paths are relative to the omp
+  session's directory, or absolute outside it.
+- A file with unsaved edits also gets a temp-file snapshot, so omp never reads stale content.
+- Buffers that aren't files on disk (Neogit, diffview, scratch buffers) are inlined, so selecting lines in a
+  Neogit status or diff view works.
+- `@hunk` and `@diff` compare the buffer, unsaved edits included, against the git index: the same unstaged
+  changes gitsigns shows. `@staged` and `@unstaged` run git on the repository as saved on disk.
+- Diffs and lists are fenced and placed on their own lines.
+
+### Which omp session?
+
+Every running omp advertises itself, and Neovim picks one by its directory relative to `:pwd`:
+
+1. an omp in the same directory
+2. the nearest parent directory (omp at the repo root, Neovim in a subdirectory)
+3. a subdirectory (Neovim at the root, omp in a subdirectory)
+
+When several tie, for example two omp sessions in one repo, Neovim asks once and remembers the choice until
+that omp exits. `:OmpSelect` (`<leader>ot`) switches at any time and also lists unrelated sessions.
+
+### When omp is busy
+
+A prompt sent mid-turn would normally *steer* the running turn. omp.nvim instead queues it as a follow-up
+that runs when the turn ends, and tells you. Set `busy = "steer"` to interrupt, or `busy = "aside"` to inject
+it at the next step without stopping the current tool calls.
+
+### Keymaps
+
+| Key          | Mode | Action                                      |
+| ------------ | ---- | ------------------------------------------- |
+| `<leader>oa` | n, x | ask (x: about the selection)                |
+| `<leader>oA` | n, x | ask, hold in omp's input                    |
+| `<leader>oh` | n    | ask about the hunk under the cursor         |
+| `<leader>od` | n    | ask about this file's unstaged changes      |
+| `<leader>oD` | n    | ask about all unstaged changes              |
+| `<leader>os` | n    | ask about staged changes                    |
+| `<leader>oe` | n, x | ask about diagnostics                       |
+| `<leader>oq` | n    | ask about the quickfix list                 |
+| `<leader>ot` | n    | choose the omp session                      |
+
+The diff/diagnostic keys open the editor prefilled with the placeholder; type your question after it.
+
+## Configuration
+
+Defaults, passed to `setup()` or set as `vim.g.omp_nvim` before the plugin loads:
+
+```lua
+require("omp_nvim").setup({
+  auto_install = true,   -- install/refresh the bridge on startup
+  extension_dirs = nil,  -- list of dirs to install into; nil detects omp's agent dirs and profiles
+  keymaps = true,        -- default <leader>o* keymaps
+  busy = "followUp",     -- delivery while omp is mid-turn: "followUp" | "steer" | "aside"
+  reload = true,         -- :checktime when an omp turn ends
+})
 ```
 
-Without nvim:
+`vim.g.omp_nvim_no_keymaps = true` also disables the keymaps.
 
-```bash
-cp <repo>/extension/omp-nvim-bridge.ts ~/.omp/agent/extensions/omp-nvim-bridge.ts
-```
-
-> [!IMPORTANT]
-> Restart omp after (re)installing — extensions are only picked up at process start.
-
-## 🚀 Usage
-
-### Ask — `:OmpAsk` / `<leader>oa`
-
-Send a prompt to the omp in this directory.
-
-| Form            | Sends                                                     |
-| --------------- | --------------------------------------------------------- |
-| `:OmpAsk`       | Floating dialog; Enter submits, Esc discards              |
-| `:OmpAsk text`  | The prompt as given                                       |
-| `:5,20OmpAsk`   | Lines 5–20 of the current file as context                 |
-| `:%OmpAsk`      | The whole file as context                                 |
-| `:'<,'>OmpAsk`  | The last visual range                                     |
-| `<leader>oa` (n)| Dialog ask with `@this`/`@buffer` resolved                |
-| `<leader>oa` (x)| Ask about the visual selection                            |
-| `<leader>oA` (n)| Same dialog, but always holds (fills omp input, waits)    |
-| `<leader>oA` (x)| Hold the visual selection as a prompt                     |
-
-**Hold mode**: `<leader>oA` (or `ask({ hold = true })`) runs the same dialog,
-but Enter fills omp's input editor instead of submitting — review it there,
-then press Enter in omp when you're ready.
-
-Opt out of the default keymaps with `vim.g.omp_nvim_no_keymaps = true`.
-
-### API
+## API
 
 ```lua
 local omp = require("omp_nvim")
 
-omp.prompt("Review the error handling here")                -- Inject a prompt verbatim (runs immediately)
-omp.prompt("Review this", { submit = false })               -- Fill omp's input; press Enter there to run
-omp.input_dialog("omp: ", function(text, mode) end)         -- Floating dialog; mode = "submit"|"hold"|nil
-omp.send_range(5, 20, "Review these lines:")                -- Send file lines 5-20
-omp.send_selection("x", "Explain this:")                    -- Send the last visual selection
-omp.ask()                                                   -- Interactive ask, @this/@buffer resolved
+omp.ask()                                  -- prompt editor; attaches the selection in visual mode
+omp.ask({ default = "@hunk ", hold = true })
+omp.prompt("Review the error handling")    -- verbatim, no placeholders
+omp.prompt("Draft", { submit = false })    -- hold in omp's input
+omp.send_range(5, 20, "Explain this")      -- file lines 5-20 + instruction
+omp.send_selection("Explain this")         -- last visual selection
+omp.select()                               -- choose the omp session
 ```
 
-### Placeholders
-
-`@this` and `@buffer` are replaced with file references in any non-range `:OmpAsk` (interactive or not) and in `omp.ask()`:
-
-| Placeholder | Reference                                |
-| ----------- | ---------------------------------------- |
-| `@this`     | `@path:start-end` of the visual range or selection, else the current file |
-| `@buffer`   | The whole current file                   |
-
-Context is sent as references (`@path:5-20`), not inlined content — the agent
-reads the file itself, keeping prompts small even for big files. Buffers with
-unsaved changes are snapshotted to a temp file (referenced in the prompt) so
-the agent never reads stale disk content; unnamed buffers are inlined.
-
-## 🛠 How it works
-
-`setup()` installs the bundled bridge extension to `~/.omp/agent/extensions/omp-nvim-bridge.ts`, where every omp auto-discovers it. The extension opens a per-directory Unix socket (`~/.omp/run/omp-nvim/omp-nvim-<hash>.sock`); the plugin sends JSONL prompt frames over it, and the bridge injects them into the live session — submitting via `sendUserMessage`, or filling the input editor (waits for Enter) when the frame carries `submit: false` (see [Bridge extension](#-bridge-extension) for reinstalling).
-
-> [!IMPORTANT]
-> The omp instance must have been started (or restarted) after the extension was installed to pick it up.
-
-## 👀 Events
-
-The bridge streams session status back to the plugin. When a turn ends, modified files are reloaded from disk via `checktime` (buffers with local changes are protected). Status events are also exposed for your own handlers:
+Status events from the connected session:
 
 ```lua
-require("omp_nvim.bridge").on_status(function(event)
-  -- "ready" | "turn_started" | "turn_ended" | "prompt_accepted"
-  if event == "turn_started" then
-    vim.notify("omp is working…")
-  end
+require("omp_nvim.bridge").on_status(function(event, frame)
+  -- "ready" | "turn_started" | "turn_ended" | "prompt_accepted" (frame.delivery)
 end)
 ```
 
-## ⚙️ Configuration
+## How it works
 
-omp.nvim ships with sensible defaults — there is nothing to configure for basic use. The only option today:
+Each interactive omp loads the bridge, which listens on `~/.omp/run/omp-nvim/<pid>.sock` and describes
+itself in `<pid>.json` (directory, session title, protocol version). Subagents and non-interactive omp modes
+don't bind. Neovim reads the metadata, picks a session, and sends JSONL prompt frames. The bridge checks
+whether omp is mid-turn and delivers through omp's extension API: start a turn, queue a follow-up, steer, or
+fill the input box. It removes its files when omp exits. `OMP_NVIM_RUN_DIR` overrides the directory for
+both sides.
 
-| Option                       | Effect                                   |
-| ---------------------------- | ---------------------------------------- |
-| `vim.g.omp_nvim_no_keymaps`  | Disable the default `<leader>oa` keymaps |
+## Development
 
-### Keymaps
+```sh
+nix develop          # neovim, bun, git, stylua, luacheck
+nvim --headless --clean -l tests/run.lua   # Lua tests
+bun test tests/bridge.test.ts              # bridge tests
+nix flake check      # everything, as CI runs it
+```
 
-| Default       | Mode | Effect                              |
-| ------------- | ---- | ----------------------------------- |
-| `<leader>oa`  | n    | Interactive ask                     |
-| `<leader>oa`  | x    | Ask about the selection             |
-| `<leader>oA`  | n    | Ask, then hold in omp's input       |
-| `<leader>oA`  | x    | Hold the selection in omp's input   |
+## License
 
-Opt out with `vim.g.omp_nvim_no_keymaps = true` (must be set before the plugin loads) and bind your own — see the [Setup](#-setup) snippets for vim.pack and lazy.nvim, or simply remap over the defaults with `vim.keymap.set` after plugin load.
-
-## 📄 License
-
-[MIT](LICENSE) © [l3aro](https://github.com/l3aro)
+[MIT](LICENSE) © [l3aro](https://github.com/l3aro), [quanchobi](https://github.com/quanchobi)
