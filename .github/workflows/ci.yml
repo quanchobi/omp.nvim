@@ -10,26 +10,18 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  check:
+    # Lua tests, bridge tests, stylua, luacheck, and the plugin build.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Stylua
-        run: |
-          curl -L https://github.com/JohnnyMorganz/StyLua/releases/latest/download/stylua-linux-x86_64.zip -o stylua.zip
-          unzip stylua.zip -d /usr/local/bin
-          chmod +x /usr/local/bin/stylua
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Run Stylua check
-        run: stylua --check .
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - name: Install Luacheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y lua5.1 luarocks
-          sudo luarocks install luacheck
-
-      - name: Run Luacheck
-        run: luacheck lua plugin
+      - name: Run flake checks
+        run: nix flake check -L
