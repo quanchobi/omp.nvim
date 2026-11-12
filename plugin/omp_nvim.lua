@@ -1,60 +1,50 @@
--- omp.nvim entry: setup, commands, and turn-end file refresh.
-require("omp_nvim").setup()
+-- omp.nvim entry: commands, default keymaps, turn-end reload, bridge install.
+if vim.g.loaded_omp_nvim then
+  return
+end
+vim.g.loaded_omp_nvim = true
+
+local omp = require("omp_nvim")
+local config = require("omp_nvim.config")
+
+if not config.configured then
+  config.setup()
+end
+omp.apply_keymaps()
+
+-- :OmpAsk[!] [instruction] — ! fills omp's input instead of sending.
+--   :OmpAsk              open the prompt editor
+--   :OmpAsk text         send text (placeholders resolved)
+--   :5,20OmpAsk [text]   send lines 5-20 of this file with an optional instruction
+vim.api.nvim_create_user_command("OmpAsk", function(args)
+  local ctx = require("omp_nvim.context").new(args.range > 0 and { args.line1, args.line2 } or nil)
+  if args.args ~= "" or args.range > 0 then
+    omp.send_context(ctx, args.args, { hold = args.bang })
+  else
+    omp.ask_context(ctx, { hold = args.bang })
+  end
+end, { range = true, nargs = "*", bang = true, desc = "Ask the omp session for this directory" })
+
+vim.api.nvim_create_user_command("OmpSelect", omp.select, { desc = "Choose the omp session to talk to" })
+
+vim.api.nvim_create_user_command("OmpNvimInstallExtension", omp.install_extension, {
+  desc = "Install the omp.nvim bridge into omp's extension directories",
+})
 
 require("omp_nvim.bridge").on_status(function(event)
-  if event == "turn_ended" then
-    vim.cmd("checktime") -- reload files omp changed on disk; modified buffers are protected
+  if event == "turn_ended" and config.options.reload then
+    pcall(vim.cmd.checktime) -- reload files omp changed; buffers with local edits are protected
   end
 end)
 
--- :OmpAsk [instruction] — send a prompt to the omp in this directory.
--- Ranges send the current file's lines: :5,20OmpAsk, :%OmpAsk, :'<,'>OmpAsk.
--- @placeholders in the instruction are NOT expanded on the range branch
--- (the range is the context); use the visual <leader>oa mapping instead.
-vim.api.nvim_create_user_command("OmpAsk", function(args)
-  local text = table.concat(args.fargs, " ")
-  local omp = require("omp_nvim")
-  local notify_err = function(ok, err)
-    if not ok then
-      vim.notify(err, vim.log.levels.WARN, { title = "omp.nvim" })
-    end
+-- Deferred so setup() from init.lua or a plugin manager's opts can disable it.
+local function install()
+  if config.options.auto_install then
+    omp.install_extension()
   end
-  if args.range > 0 then
-    notify_err(omp.send_range(args.line1, args.line2, text))
-  else
-    -- Snapshot before input: input() exits visual mode / moves the cursor.
-    local ctx = require("omp_nvim.context").new()
-    if text ~= "" then
-      notify_err(omp.prompt(ctx:render(text)))
-    else
-      -- Floating dialog: Enter submits, Esc (or empty) discards.
-      omp.input_dialog("omp: ", function(input, mode)
-        if not input or input == "" then
-          return
-        end
-        notify_err(omp.prompt(ctx:render(input), mode == "hold" and { submit = false } or nil))
-      end)
-    end
-  end
-end, { range = true, nargs = "*" })
-
--- :OmpNvimInstallExtension — (re)install the bridge into ~/.omp/agent/extensions.
-vim.api.nvim_create_user_command("OmpNvimInstallExtension", function()
-  require("omp_nvim").install_extension()
-end, {})
-
--- Default keymaps; opt out with vim.g.omp_nvim_no_keymaps = true
-if not vim.g.omp_nvim_no_keymaps then
-  vim.keymap.set("n", "<leader>oa", function()
-    vim.cmd("OmpAsk")
-  end, { desc = "omp: ask" })
-  vim.keymap.set("x", "<leader>oa", function()
-    require("omp_nvim").ask()
-  end, { desc = "omp: ask selection" })
-  vim.keymap.set("n", "<leader>oA", function()
-    require("omp_nvim").ask({ hold = true })
-  end, { desc = "omp: ask & hold (fill omp input, Enter there to run)" })
-  vim.keymap.set("x", "<leader>oA", function()
-    require("omp_nvim").ask({ hold = true })
-  end, { desc = "omp: ask selection & hold" })
+end
+if vim.v.vim_did_enter == 1 then
+  vim.schedule(install)
+else
+  vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = install })
 end

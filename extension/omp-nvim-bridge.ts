@@ -1,180 +1,304 @@
-// omp.nvim bridge — runs inside every omp process (auto-discovered from
-// ~/.omp/agent/extensions/). Opens a per-cwd Unix socket; the nvim plugin
-// sends JSONL frames; prompts are injected into this process's live session
-// via pi.sendUserMessage. Status frames flow back for :checktime refresh.
+// omp.nvim bridge — loaded by omp from an extensions directory.
+//
+// One bridge per omp process, owned by the main interactive (TUI) session;
+// subagent sessions and non-TUI modes never bind. The bridge listens on
+// <run>/<pid>.sock and advertises itself in <run>/<pid>.json so nvim can
+// discover every live omp, match it to its working directory, and let the
+// user pick when several qualify.
 //
 // Wire protocol (one JSON object per line):
 //   in:  {"type":"ping"}
-//   in:  {"type":"prompt","text":"...","submit":true}   submit=false fills the input editor and waits for Enter
+//   in:  {"type":"prompt","text":"...","submit":true,"busy":"followUp"}
+//          submit=false fills omp's input editor and waits for Enter.
+//          busy picks the delivery while a turn is running:
+//          "followUp" (default, queued after the turn) | "steer" | "aside".
 //   out: {"type":"pong"}
 //   out: {"type":"status","event":"ready"|"turn_started"|"turn_ended"}
+//   out: {"type":"status","event":"prompt_accepted","delivery":"prompt"|"editor"|"followUp"|"steer"|"aside"}
+//   out: {"type":"error","message":"..."}
 import * as fs from "node:fs";
-import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
 
-const DIR = path.join(os.homedir(), ".omp", "run", "omp-nvim");
-const HASH_LEN = 16;
-const SOCKET_MODE = 0o600;
+/** Bumped on any wire or metadata change; nvim ignores bridges with another version. */
+export const PROTOCOL_VERSION = 2;
 
-interface Pi {
-  sendUserMessage(content: string, options?: { deliverAs?: string }): void;
-  on(event: string, handler: (event: unknown, ctx: unknown) => void): void;
-}
+type Busy = "followUp" | "steer" | "aside";
+const BUSY_MODES: Record<string, Busy> = { followUp: "followUp", steer: "steer", aside: "aside" };
 
-interface SessionCtx {
-  ui: {
+interface Ctx {
+  mode?: string;
+  hasUI?: boolean;
+  cwd?: string;
+  agent?: { kind?: string };
+  isIdle?(): boolean;
+  ui?: {
     getEditorText(): string;
     setEditorText(text: string): void;
   };
-  hasUI: boolean;
+}
+
+interface Pi {
+  sendUserMessage(content: string, options?: { deliverAs?: Busy }): void;
+  on(event: string, handler: (event: unknown, ctx: Ctx) => void): void;
+  getSessionName?(): string | undefined;
+}
+
+interface Client {
+  write(data: string): unknown;
+}
+
+interface Bridge {
+  pi: Pi;
+  ctx: Ctx;
+  busy: boolean;
+  /** Set once the socket is bound. */
+  server?: { stop(closeActiveConnections?: boolean): void };
+  clients: Set<Client>;
+  socketPath: string;
+  metaPath: string;
+  started: number;
 }
 
 interface PromptFrame {
   type: "prompt";
   text: string;
-  /** false = fill the input editor without submitting; the user presses Enter to run. */
   submit?: boolean;
+  busy?: string;
+}
+
+const STATE = Symbol.for("omp-nvim-bridge");
+// Process-wide singleton: omp re-runs this factory for every (sub)agent session.
+const registry = globalThis as unknown as { [STATE]?: Bridge };
+
+export function runDir(): string {
+  return process.env.OMP_NVIM_RUN_DIR || path.join(os.homedir(), ".omp", "run", "omp-nvim");
+}
+
+/** Interactive main session: not a subagent, and not print/rpc/json mode. */
+function isMainTui(ctx: Ctx): boolean {
+  return ctx.agent?.kind !== "sub" && (ctx.mode === undefined || ctx.mode === "tui");
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "EPERM";
+  }
+}
+
+function removeQuietly(file: string): void {
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    // already gone
+  }
+}
+
+/** Drop metadata and sockets left behind by omp processes that died without cleanup. */
+function pruneStale(dir: string): void {
+  for (const name of fs.readdirSync(dir)) {
+    const match = /^(\d+)\.(json|sock)$/.exec(name);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (pid !== process.pid && !isAlive(pid)) removeQuietly(path.join(dir, name));
+  }
+}
+
+function realCwd(ctx: Ctx): string {
+  const cwd = ctx.cwd ?? process.cwd();
+  try {
+    return fs.realpathSync(cwd);
+  } catch {
+    return cwd;
+  }
+}
+
+function sessionName(pi: Pi): string | null {
+  try {
+    return pi.getSessionName?.() || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeMeta(bridge: Bridge): void {
+  const meta = {
+    version: PROTOCOL_VERSION,
+    pid: process.pid,
+    cwd: realCwd(bridge.ctx),
+    socket: bridge.socketPath,
+    started: bridge.started,
+    session: sessionName(bridge.pi),
+  };
+  const tmp = `${bridge.metaPath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(meta), { mode: 0o600 });
+  fs.renameSync(tmp, bridge.metaPath);
+}
+
+function send(client: Client, frame: object): void {
+  client.write(`${JSON.stringify(frame)}\n`);
+}
+
+function broadcast(bridge: Bridge, frame: object): void {
+  for (const client of bridge.clients) send(client, frame);
 }
 
 function isPromptFrame(value: unknown): value is PromptFrame {
-  if (typeof value !== "object" || value === null) return false;
-  if (!("type" in value) || !("text" in value)) return false;
-  return value.type === "prompt" && typeof value.text === "string";
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    value.type === "prompt" &&
+    "text" in value &&
+    typeof value.text === "string"
+  );
 }
 
-function socketPathFor(cwd: string): string {
-  const hash = createHash("sha256").update(cwd).digest("hex").slice(0, HASH_LEN);
-  return path.join(DIR, `omp-nvim-${hash}.sock`);
+/** Deliver a prompt; returns how it was delivered. */
+function deliver(bridge: Bridge, frame: PromptFrame): string {
+  const { ctx, pi } = bridge;
+  if (frame.submit === false && ctx.hasUI && ctx.ui) {
+    const current = ctx.ui.getEditorText();
+    ctx.ui.setEditorText(current ? `${current}\n${frame.text}` : frame.text);
+    return "editor";
+  }
+  const busy = typeof ctx.isIdle === "function" ? !ctx.isIdle() : bridge.busy;
+  if (!busy) {
+    pi.sendUserMessage(frame.text);
+    return "prompt";
+  }
+  // Omitting deliverAs while a turn runs would steer (interrupt) it.
+  const deliverAs = frame.busy && Object.hasOwn(BUSY_MODES, frame.busy) ? BUSY_MODES[frame.busy] : "followUp";
+  pi.sendUserMessage(frame.text, { deliverAs });
+  return deliverAs;
 }
 
-/** True if something is alive on the socket (another omp owns it). */
-function isOccupied(socketPath: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const probe = net.createConnection(socketPath);
-    probe.once("connect", () => {
-      probe.destroy();
-      resolve(true);
-    });
-    probe.once("error", () => resolve(false));
-  });
-}
-
-export default async function ompNvimBridge(pi: Pi): Promise<void> {
-  fs.mkdirSync(DIR, { recursive: true });
-  const socketPath = socketPathFor(process.cwd());
-
-  if (fs.existsSync(socketPath) && (await isOccupied(socketPath))) {
-    console.error(
-      `[omp-nvim] bridge disabled: another omp already owns ${socketPath} for ${process.cwd()}`,
-    );
+function handleLine(bridge: Bridge, client: Client, line: string): void {
+  if (!line.trim()) return;
+  let frame: unknown;
+  try {
+    frame = JSON.parse(line);
+  } catch {
+    send(client, { type: "error", message: "malformed frame" });
     return;
   }
-  if (fs.existsSync(socketPath)) {
-    fs.unlinkSync(socketPath); // stale socket from a dead omp
-  }
-
-  const clients = new Set<net.Socket>();
-  const clientBufs = new WeakMap<net.Socket, string>();
-
-  let sessionCtx: SessionCtx | undefined;
-  const pendingCompose: string[] = [];
-
-  // Fill the input editor without submitting (user presses Enter to run).
-  const compose = (text: string): void => {
-    if (!sessionCtx) {
-      pendingCompose.push(text); // session not started yet; flush on session_start
-      return;
-    }
-    if (!sessionCtx.hasUI) {
-      pi.sendUserMessage(text); // headless: no input editor, fall back to submitting
-      return;
-    }
-    const current = sessionCtx.ui.getEditorText();
-    sessionCtx.ui.setEditorText(current ? `${current}\n${text}` : text);
-  };
-
-  const broadcast = (frame: object): void => {
-    const line = `${JSON.stringify(frame)}\n`;
-    for (const client of clients) {
-      client.write(line);
-    }
-  };
-
-  const handleLine = (client: net.Socket, line: string): void => {
-    if (!line.trim()) return;
-    let frame: unknown;
+  if (isPromptFrame(frame)) {
     try {
-      frame = JSON.parse(line);
-    } catch {
-      return;
+      send(client, { type: "status", event: "prompt_accepted", delivery: deliver(bridge, frame) });
+    } catch (error) {
+      send(client, { type: "error", message: String(error) });
     }
-    if (isPromptFrame(frame)) {
-      if (frame.submit === false) {
-        compose(frame.text);
-      } else {
-        pi.sendUserMessage(frame.text);
-      }
-      client.write(`${JSON.stringify({ type: "status", event: "prompt_accepted" })}\n`);
-    } else if (typeof frame === "object" && frame !== null && "type" in frame && frame.type === "ping") {
-      client.write(`${JSON.stringify({ type: "pong" })}\n`);
-    }
+  } else if (typeof frame === "object" && frame !== null && "type" in frame && frame.type === "ping") {
+    send(client, { type: "pong" });
+  }
+}
+
+function start(pi: Pi, ctx: Ctx): Bridge | undefined {
+  const dir = runDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  pruneStale(dir);
+  const socketPath = path.join(dir, `${process.pid}.sock`);
+  removeQuietly(socketPath);
+
+  const decoders = new WeakMap<Client, { decoder: TextDecoder; buf: string }>();
+  const bridge: Bridge = {
+    pi,
+    ctx,
+    busy: false,
+    clients: new Set<Client>(),
+    socketPath,
+    metaPath: path.join(dir, `${process.pid}.json`),
+    started: Date.now(),
   };
 
-  let server: ReturnType<typeof Bun.listen>;
   try {
-    server = Bun.listen({
+    bridge.server = Bun.listen<undefined>({
       unix: socketPath,
       socket: {
         open(client) {
-          clients.add(client);
-          clientBufs.set(client, "");
-          client.write(`${JSON.stringify({ type: "status", event: "ready" })}\n`);
+          bridge.clients.add(client);
+          decoders.set(client, { decoder: new TextDecoder(), buf: "" });
+          send(client, { type: "status", event: "ready" });
         },
-        data(client, buffer) {
-          const combined = (clientBufs.get(client) ?? "") + buffer.toString();
-          const lines = combined.split("\n");
-          clientBufs.set(client, lines.pop() ?? "");
-          for (const line of lines) {
-            handleLine(client, line);
-          }
+        data(client, chunk) {
+          const state = decoders.get(client);
+          if (!state) return;
+          const lines = (state.buf + state.decoder.decode(chunk, { stream: true })).split("\n");
+          state.buf = lines.pop() ?? "";
+          for (const line of lines) handleLine(bridge, client, line);
         },
         close(client) {
-          clients.delete(client);
-          clientBufs.delete(client);
+          bridge.clients.delete(client);
         },
-        error(client, error) {
-          clients.delete(client);
-          console.error(`[omp-nvim] socket error: ${String(error)}`);
+        error(client) {
+          bridge.clients.delete(client);
         },
       },
     });
   } catch (error) {
     console.error(`[omp-nvim] bridge disabled: cannot bind ${socketPath}: ${String(error)}`);
-    return;
+    return undefined;
   }
   try {
-    fs.chmodSync(socketPath, SOCKET_MODE);
+    fs.chmodSync(socketPath, 0o600);
   } catch {
-    // non-fatal; dir is user-private anyway
+    // non-fatal; the run dir is user-private
   }
+  writeMeta(bridge);
+  process.once("exit", () => stop(bridge));
+  return bridge;
+}
 
+function stop(bridge: Bridge): void {
+  if (registry[STATE] === bridge) delete registry[STATE];
+  try {
+    bridge.server?.stop(true);
+  } catch {
+    // already stopped
+  }
+  removeQuietly(bridge.socketPath);
+  removeQuietly(bridge.metaPath);
+}
+
+/** The bridge, when this runner's main session owns it. */
+function owned(pi: Pi, ctx: Ctx): Bridge | undefined {
+  const bridge = registry[STATE];
+  return bridge && bridge.pi === pi && isMainTui(ctx) ? bridge : undefined;
+}
+
+export default function ompNvimBridge(pi: Pi): void {
   pi.on("session_start", (_event, ctx) => {
-    sessionCtx = ctx as SessionCtx;
-    while (pendingCompose.length > 0) {
-      compose(pendingCompose.shift()!);
+    if (!isMainTui(ctx)) return;
+    const bridge = registry[STATE];
+    if (bridge) {
+      // New main session in this process (e.g. /new): retarget the existing socket.
+      bridge.pi = pi;
+      bridge.ctx = ctx;
+      bridge.busy = false;
+      writeMeta(bridge);
+      return;
     }
+    const started = start(pi, ctx);
+    if (started) registry[STATE] = started;
   });
-  pi.on("agent_start", () => broadcast({ type: "status", event: "turn_started" }));
-  pi.on("agent_end", () => broadcast({ type: "status", event: "turn_ended" }));
-
-  process.on("exit", () => {
-    try {
-      server.close();
-      fs.unlinkSync(socketPath);
-    } catch {
-      // best effort
-    }
+  pi.on("agent_start", (_event, ctx) => {
+    const bridge = owned(pi, ctx);
+    if (!bridge) return;
+    bridge.busy = true;
+    broadcast(bridge, { type: "status", event: "turn_started" });
+  });
+  pi.on("agent_end", (_event, ctx) => {
+    const bridge = owned(pi, ctx);
+    if (!bridge) return;
+    bridge.busy = false;
+    writeMeta(bridge); // the session may have been titled during the turn
+    broadcast(bridge, { type: "status", event: "turn_ended" });
+  });
+  pi.on("session_shutdown", (_event, ctx) => {
+    const bridge = owned(pi, ctx);
+    if (bridge) stop(bridge);
   });
 }
