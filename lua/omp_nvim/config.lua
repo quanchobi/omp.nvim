@@ -7,12 +7,14 @@ local M = {}
 ---@field keymaps boolean Create the default <leader>o* keymaps.
 ---@field busy "followUp"|"steer"|"aside" Delivery while omp is mid-turn (default: queue after the turn).
 ---@field reload boolean Reload buffers when their files change on disk (unsaved buffers are kept).
+---@field inline_max_lines integer @this/@buffer up to this many lines are sent as text, longer as a reference.
 local defaults = {
   auto_install = true,
   extension_dirs = nil,
   keymaps = true,
   busy = "followUp",
   reload = true,
+  inline_max_lines = 500,
 }
 
 local BUSY = { followUp = true, steer = true, aside = true }
@@ -33,6 +35,9 @@ function M.setup(opts)
   vim.validate("extension_dirs", merged.extension_dirs, "table", true)
   vim.validate("keymaps", merged.keymaps, "boolean")
   vim.validate("reload", merged.reload, "boolean")
+  if type(merged.inline_max_lines) ~= "number" or merged.inline_max_lines < 0 then
+    error(("omp.nvim: inline_max_lines must be a number >= 0 (got %s)"):format(vim.inspect(merged.inline_max_lines)))
+  end
   if not BUSY[merged.busy] then
     error(("omp.nvim: busy must be followUp, steer or aside (got %s)"):format(vim.inspect(merged.busy)))
   end

@@ -20,7 +20,7 @@ return {
       h.wait(function()
         return #fake.frames == 1
       end)
-      h.eq("why is this here?\n\n@sub/f.txt:5-6", fake.frames[1].text)
+      h.eq("why is this here?\n\nsub/f.txt lines 5-6:\n```text\nline5\nline6\n```", fake.frames[1].text)
       h.eq(true, fake.frames[1].submit)
     end,
   },

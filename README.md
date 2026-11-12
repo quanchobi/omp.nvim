@@ -141,8 +141,8 @@ yourself.
 
 | Placeholder    | Becomes                                                                   |
 | -------------- | ------------------------------------------------------------------------- |
-| `@this`        | the visual range (`@path:5-20`), else the current file                    |
-| `@buffer`      | the current file (`@path`)                                                |
+| `@this`        | the text of the visual range, else of the current file                    |
+| `@buffer`      | the text of the current file                                              |
 | `@hunk`        | the unstaged diff hunk under the cursor                                   |
 | `@diff`        | this file's unstaged diff                                                 |
 | `@unstaged`    | `git diff` for the whole repository                                       |
@@ -150,11 +150,11 @@ yourself.
 | `@diagnostics` | diagnostics in the visual range, else the whole buffer                    |
 | `@quickfix`    | the current quickfix list                                                 |
 
-- Saved files are sent as references (`@path:5-20`) that omp reads itself. Paths are relative to the omp
-  session's directory, or absolute outside it.
-- A file with unsaved edits also gets a temp-file snapshot, so omp never reads stale content.
-- Buffers that aren't files on disk (Neogit, diffview, scratch buffers) are inlined, so selecting lines in a
-  Neogit status or diff view works.
+- `@this` and `@buffer` send the buffer's text, unsaved edits included, fenced under a path header
+  (`sub/f.lua lines 5-20:`). Paths are relative to the omp session's directory, or absolute outside it.
+- Ranges longer than `inline_max_lines` (500) are sent as a reference (`@path:5-20`) for omp to read
+  instead; with unsaved edits they also get a temp-file snapshot, so omp never reads stale content.
+- Buffers that aren't files on disk (Neogit, diffview, scratch buffers) are always sent as text.
 - `@hunk` and `@diff` compare the buffer, unsaved edits included, against the git index: the same unstaged
   changes gitsigns shows. `@staged` and `@unstaged` run git on the repository as saved on disk.
 - Diffs and lists are fenced and placed on their own lines.
@@ -203,6 +203,7 @@ require("omp_nvim").setup({
   keymaps = true,        -- default <leader>o* keymaps
   busy = "followUp",     -- delivery while omp is mid-turn: "followUp" | "steer" | "aside"
   reload = true,         -- reload buffers when their files change on disk (needs 'autoread', on by default)
+  inline_max_lines = 500, -- @this/@buffer up to this many lines go as text; longer as a @path reference
 })
 ```
 

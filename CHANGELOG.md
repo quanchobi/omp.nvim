@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.0] - 2026-11-12
+
+### Changes
+
+- `@this` and `@buffer` (including selections attached automatically) send the buffer's text, fenced under a path header, instead of a `@path:5-20` reference omp had to read back. Unsaved edits are included and marked. Ranges longer than the new `inline_max_lines` option (default 500) are still sent as references
+
 ## [0.3.0] - 2026-11-12
 
 ### Features

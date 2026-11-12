@@ -7,7 +7,7 @@
     { self, nixpkgs }:
     let
       inherit (nixpkgs) lib;
-      version = "0.3.0";
+      version = "0.4.0";
       systems = [
         "x86_64-linux"
         "aarch64-linux"

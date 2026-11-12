@@ -9,6 +9,7 @@ return {
   {
     "placeholders need word boundaries and unknown @words stay as written",
     function()
+      require("omp_nvim.config").setup({ inline_max_lines = 0 }) -- keep @this a one-line reference
       local root = h.tmpdir()
       edit(h.write(root .. "/f.txt", { "x" }))
       local ctx = require("omp_nvim.context").new()
@@ -16,28 +17,42 @@ return {
     end,
   },
   {
-    "file references are relative to the target omp's cwd, absolute outside it",
+    "selections are sent as text under a path relative to the target omp's cwd",
     function()
       local root = h.tmpdir()
-      local file = h.write(root .. "/sub/f.txt", h.lines(5))
+      local file = h.write(root .. "/sub/f.lua", h.lines(5))
       edit(file)
       local ctx = require("omp_nvim.context").new({ 2, 3 })
-      h.eq("@sub/f.txt:2-3", ctx:render("@this", root))
-      h.eq("@f.txt:2-3", ctx:render("@this", root .. "/sub"))
-      h.eq("@" .. file .. ":2-3", ctx:render("@this", h.tmpdir()))
-      h.eq("@sub/f.txt", ctx:render("@buffer", root))
+      h.eq("sub/f.lua lines 2-3:\n```lua\nline2\nline3\n```", ctx:render("@this", root))
+      h.eq("f.lua lines 2-3:\n```lua\nline2\nline3\n```", ctx:render("@this", root .. "/sub"))
+      h.eq(file .. " lines 2-3:\n```lua\nline2\nline3\n```", ctx:render("@this", h.tmpdir()))
+      h.eq("sub/f.lua:\n```lua\nline1\nline2\nline3\nline4\nline5\n```", ctx:render("@buffer", root))
     end,
   },
   {
-    "unsaved edits are referenced with a snapshot of the buffer",
+    "unsaved edits are sent as the buffer's text, marked unsaved",
     function()
       local root = h.tmpdir()
-      local buf = edit(h.write(root .. "/f.txt", h.lines(3)))
+      local buf = edit(h.write(root .. "/f.lua", h.lines(3)))
       vim.api.nvim_buf_set_lines(buf, 1, 2, false, { "edited" })
       local text = require("omp_nvim.context").new({ 1, 2 }):render("@this", root)
-      local snapshot = text:match("exact content at (%S+)%)$")
-      h.truthy(vim.startswith(text, "@f.txt:1-2 (unsaved buffer"), text)
-      h.eq({ "line1", "edited" }, vim.fn.readfile(snapshot))
+      h.eq("f.lua lines 1-2 (unsaved edits):\n```lua\nline1\nedited\n```", text)
+    end,
+  },
+  {
+    "ranges over inline_max_lines become references; unsaved ones get a snapshot",
+    function()
+      require("omp_nvim.config").setup({ inline_max_lines = 2 })
+      local root = h.tmpdir()
+      local buf = edit(h.write(root .. "/sub/f.lua", h.lines(5)))
+      h.truthy(require("omp_nvim.context").new({ 2, 3 }):render("@this", root):find("^sub/f.lua lines 2%-3:\n"))
+      h.eq("@sub/f.lua:2-4", require("omp_nvim.context").new({ 2, 4 }):render("@this", root))
+      h.eq("@sub/f.lua", require("omp_nvim.context").new():render("@buffer", root))
+
+      vim.api.nvim_buf_set_lines(buf, 1, 2, false, { "edited" })
+      local text = require("omp_nvim.context").new({ 1, 3 }):render("@this", root)
+      h.truthy(vim.startswith(text, "@sub/f.lua:1-3 (unsaved buffer"), text)
+      h.eq({ "line1", "edited", "line3" }, vim.fn.readfile(text:match("exact content at (%S+)%)$")))
     end,
   },
   {
@@ -84,10 +99,9 @@ return {
           { text = "not a location" },
         },
       })
-      -- Block values go on their own lines so the closing fence stays valid.
-      -- Inline references stay inline.
+      -- Block values go on their own lines so every fence stays valid Markdown.
       h.eq(
-        "fix\nQuickfix list (grep):\n```\na.txt:1:2: match\n```\nplease, and @a.txt",
+        "fix\nQuickfix list (grep):\n```\na.txt:1:2: match\n```\nplease, and\na.txt:\n```text\nx\n```",
         ctx:render("fix @quickfix please, and @this", root)
       )
       h.eq("Quickfix list (grep):\n```\na.txt:1:2: match\n```", ctx:render("@quickfix", root))

@@ -4,8 +4,8 @@
 ---Placeholders resolve against the *target* omp's cwd, so file references are
 ---relative to where omp runs, not where nvim runs.
 ---
----  @this        visual range (or current file) as a reference
----  @buffer      current file as a reference
+---  @this        visual range (or current file)
+---  @buffer      current file
 ---  @hunk        unstaged diff hunk under the cursor (buffer vs index)
 ---  @diff        unstaged diff of the current file (buffer vs index)
 ---  @unstaged    `git diff` of the repository
@@ -13,9 +13,10 @@
 ---  @diagnostics diagnostics in the visual range, else the whole buffer
 ---  @quickfix    current quickfix list
 ---
----Real, saved files are sent as references (`@path:5-20`) that omp reads
----itself; files with unsaved edits also get a temp-file snapshot. Anything
----that is not a file on disk (Neogit, diffview, scratch buffers) is inlined.
+---@this/@buffer send the buffer's text (unsaved edits included), fenced under
+---a path header. Ranges longer than `inline_max_lines` are sent as a reference
+---(`@path:5-20`) for omp to read instead, with a temp-file snapshot when the
+---buffer has unsaved edits.
 local Context = {}
 Context.__index = Context
 
@@ -102,24 +103,29 @@ local function snapshot(buf, from, to)
   return file
 end
 
----Reference to (or inlined content of) buffer lines [from, to].
+---Buffer lines [from, to] as fenced text under a path header, or as a
+---reference when the range exceeds `inline_max_lines`.
 ---@param buf integer
 ---@param from integer
 ---@param to integer
 ---@param base? string target omp cwd
----@param whole? boolean the range is the whole buffer (reference without line numbers)
+---@param whole? boolean the range is the whole buffer (no line numbers)
 ---@return string
 function Context.reference(buf, from, to, base, whole)
-  if not is_file(buf) then
-    local name = vim.api.nvim_buf_get_name(buf)
-    local label = name ~= "" and vim.fn.fnamemodify(name, ":t") or "[No Name]"
+  local name = vim.api.nvim_buf_get_name(buf)
+  local file = is_file(buf)
+  local unsaved = file and vim.bo[buf].modified
+  local label = file and Context.display_path(name, base)
+    or (name ~= "" and vim.fn.fnamemodify(name, ":t") or "[No Name]")
+
+  if not file or to - from + 1 <= require("omp_nvim.config").options.inline_max_lines then
     local text = table.concat(vim.api.nvim_buf_get_lines(buf, from - 1, to, false), "\n")
     local where = whole and label or ("%s lines %d-%d"):format(label, from, to)
-    return ("%s:\n%s"):format(where, Context.fence(text, vim.bo[buf].filetype))
+    return ("%s%s:\n%s"):format(where, unsaved and " (unsaved edits)" or "", Context.fence(text, vim.bo[buf].filetype))
   end
-  local file = Context.display_path(vim.api.nvim_buf_get_name(buf), base)
-  local ref = whole and ("@" .. file) or ("@%s:%d-%d"):format(file, from, to)
-  if not vim.bo[buf].modified then
+
+  local ref = whole and ("@" .. label) or ("@%s:%d-%d"):format(label, from, to)
+  if not unsaved then
     return ref
   end
   return ("%s (unsaved buffer — exact content at %s)"):format(ref, snapshot(buf, from, to))
