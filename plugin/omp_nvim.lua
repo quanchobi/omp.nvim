@@ -1,4 +1,4 @@
--- omp.nvim entry: commands, default keymaps, turn-end reload, bridge install.
+-- omp.nvim entry: commands, default keymaps, file reload, bridge install.
 if vim.g.loaded_omp_nvim then
   return
 end
@@ -31,9 +31,12 @@ vim.api.nvim_create_user_command("OmpNvimInstallExtension", omp.install_extensio
   desc = "Install the omp.nvim bridge into omp's extension directories",
 })
 
+-- Reload buffers as soon as their files change on disk.
+local reload = require("omp_nvim.reload")
+reload.start()
 require("omp_nvim.bridge").on_status(function(event)
-  if event == "turn_ended" and config.options.reload then
-    pcall(vim.cmd.checktime) -- reload files omp changed; buffers with local edits are protected
+  if event == "turn_ended" then
+    reload.check_all() -- fallback for files the watcher cannot see (e.g. network filesystems)
   end
 end)
 

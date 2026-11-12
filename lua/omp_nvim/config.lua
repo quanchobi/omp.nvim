@@ -6,7 +6,7 @@ local M = {}
 ---@field extension_dirs string[]? Install targets; nil auto-detects omp's agent dirs (incl. profiles).
 ---@field keymaps boolean Create the default <leader>o* keymaps.
 ---@field busy "followUp"|"steer"|"aside" Delivery while omp is mid-turn (default: queue after the turn).
----@field reload boolean Run :checktime when an omp turn ends.
+---@field reload boolean Reload buffers when their files change on disk (unsaved buffers are kept).
 local defaults = {
   auto_install = true,
   extension_dirs = nil,

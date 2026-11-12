@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0] - 2026-11-12
+
+### Features
+
+- Buffers reload as soon as their files change on disk, mid-turn included, instead of only when an omp turn ends. Neovim watches the directory of each open file, so it needs no omp connection and also catches subagent edits, `git checkout`, and tools that replace files by renaming
+- A buffer with unsaved edits is never reloaded; you get a notice instead, and Neovim's own write check still guards the newer file
+
+### Bug Fixes
+
+- Files omp changed were not reloaded until Neovim had sent a prompt to that omp, because the turn-end event only reaches connected clients
+
 ## [0.2.0] - 2026-11-12
 
 First release of the [quanchobi/omp.nvim](https://github.com/quanchobi/omp.nvim) fork.

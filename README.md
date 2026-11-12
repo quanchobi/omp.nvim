@@ -17,7 +17,7 @@ See the [changelog](CHANGELOG.md).
 - Prompts sent while omp is working wait for the current turn instead of interrupting it
 - Hold mode: drop the prompt into omp's input box and press Enter there yourself
 - Multi-line prompt editor with normal-mode editing
-- Files omp changed are reloaded when its turn ends
+- Open files reload the moment omp (or anything else) changes them on disk; buffers with unsaved edits are kept
 - Bridge extension installs itself into omp's extension directories, including named profiles
 
 ## Requirements
@@ -202,7 +202,7 @@ require("omp_nvim").setup({
   extension_dirs = nil,  -- list of dirs to install into; nil detects omp's agent dirs and profiles
   keymaps = true,        -- default <leader>o* keymaps
   busy = "followUp",     -- delivery while omp is mid-turn: "followUp" | "steer" | "aside"
-  reload = true,         -- :checktime when an omp turn ends
+  reload = true,         -- reload buffers when their files change on disk (needs 'autoread', on by default)
 })
 ```
 
